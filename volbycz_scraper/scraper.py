@@ -7,16 +7,16 @@ import json
 import re
 import time
 from dataclasses import dataclass, asdict, is_dataclass
-from io import StringIO
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import urljoin
 
-import pandas as pd
 import requests  # type: ignore[import-not-found]
 
 DEFAULT_TIMEOUT = 15
-BASE_URL_TEMPLATE = "https://www.volby.cz/pls/ps{year}/"
+DATA_BASE_URL_TEMPLATE = "https://www.volby.cz/appdata/ps{year}/"
+APP_BASE_URL_TEMPLATE = "https://www.volby.cz/app/ps{year}/"
+PRIMARY_RESOURCE = "vysled/celkem.json"
 USER_AGENT = "VolbyCZ-Scraper/1.0 (+https://github.com/openai/codex-ci)"
 
 CACHE_DIR = Path(__file__).resolve().parent.parent / "DATA"
@@ -28,16 +28,25 @@ FINAL_REFRESH_INTERVAL = 3600
 class ElectionDataUnavailable(RuntimeError):
     """Raised when the requested election dataset is not yet published."""
 
-    def __init__(self, year: int, resource: str, status: Optional[int] = None):
+    def __init__(
+        self,
+        year: int,
+        resource: str,
+        status: Optional[int] = None,
+        reason: Optional[str] = None,
+    ):
         detail = f"{resource}"
         if status is not None:
             detail += f" (status {status})"
+        if reason:
+            detail += f" · {reason.strip()}"
         super().__init__(
             f"Election results for {year} are not available yet or resource is unreachable: {detail}"
         )
         self.year = year
         self.resource = resource
         self.status = status
+        self.reason = reason
 
 
 _number_pattern = re.compile(r"[^0-9-]")
@@ -72,7 +81,7 @@ def _extract_js_literal(script: str, marker: str, opening: str) -> str:
         elif char == closing:
             depth -= 1
             if depth == 0:
-                return script[start : index + 1]  # flake8: ignore[E203]
+                return script[start : index + 1]  # noqa: E203
         escape = False
     raise ValueError("Unbalanced braces while parsing JS literal")
 
@@ -147,43 +156,87 @@ class ElectionScraper:
         lang: str = "EN",
         session: Optional[requests.Session] = None,
         timeout: int = DEFAULT_TIMEOUT,
+        data_source: Optional[str] = None,
     ) -> None:
         self.year = year
         self.lang = lang
         self.timeout = timeout
-        self.base_url = BASE_URL_TEMPLATE.format(year=year)
+        self.data_source = (data_source or "").strip("/")
+        self._data_prefix = f"{self.data_source}/" if self.data_source else ""
+        self.data_base_url = DATA_BASE_URL_TEMPLATE.format(year=year)
+        self.app_base_url = APP_BASE_URL_TEMPLATE.format(year=year)
         self.session = session or requests.Session()
         self.session.headers.setdefault("User-Agent", USER_AGENT)
-        self._ps2_tables: Optional[List[pd.DataFrame]] = None
         self.resource_headers: Dict[str, Dict[str, str]] = {}
+        self._national_data: Optional[Dict[str, Any]] = None
+        self._party_lookup: Dict[int, str] = {}
 
     # ------------------------------------------------------------------
     # Core helpers
     # ------------------------------------------------------------------
 
-    def _build_url(self, resource: str) -> str:
-        return urljoin(self.base_url, resource)
+    def _normalized_resource(self, resource: str) -> str:
+        return resource.lstrip("/")
 
-    def _fetch_text(self, resource: str) -> str:
-        url = self._build_url(resource)
-        response = self.session.get(url, timeout=self.timeout)
+    def _prefixed_resource(self, resource: str) -> str:
+        normalized = self._normalized_resource(resource)
+        return f"{self._data_prefix}{normalized}" if self._data_prefix else normalized
+
+    def _build_data_url(self, resource: str) -> str:
+        return urljoin(self.data_base_url, self._prefixed_resource(resource))
+
+    def _build_app_url(self, resource: str) -> str:
+        return urljoin(self.app_base_url, self._normalized_resource(resource))
+
+    def _fetch_json(self, resource: str) -> Dict[str, Any]:
+        prefixed_resource = self._prefixed_resource(resource)
+        url = urljoin(self.data_base_url, prefixed_resource)
+        try:
+            response = self.session.get(url, timeout=self.timeout)
+        except requests.RequestException as exc:  # pragma: no cover - network failure
+            raise ElectionDataUnavailable(self.year, prefixed_resource) from exc
+
         if response.status_code != 200:
-            raise ElectionDataUnavailable(self.year, resource, response.status_code)
-        self.resource_headers[resource] = dict(response.headers)
+            reason: Optional[str] = None
+            content_type = response.headers.get("Content-Type", "")
+            if "application/problem+json" in content_type:
+                try:
+                    problem = response.json()
+                except ValueError:
+                    problem = None
+                if isinstance(problem, dict):
+                    reason = str(
+                        problem.get("message")
+                        or problem.get("detail")
+                        or problem.get("title")
+                    )
+            raise ElectionDataUnavailable(
+                self.year, prefixed_resource, response.status_code, reason
+            )
+
+        self.resource_headers[prefixed_resource] = dict(response.headers)
         text = response.text
         lowered = text.lower()
         if "chyba 404" in lowered or "page not found" in lowered:
-            raise ElectionDataUnavailable(self.year, resource, response.status_code)
-        return text
+            raise ElectionDataUnavailable(
+                self.year,
+                prefixed_resource,
+                response.status_code,
+                "page not found",
+            )
 
-    def _fetch_tables(self, resource: str) -> List[pd.DataFrame]:
-        html = self._fetch_text(resource)
-        return pd.read_html(StringIO(html))
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"Invalid JSON payload returned by {url}") from exc
+        if not isinstance(payload, dict):
+            raise RuntimeError(f"Unexpected JSON structure returned by {url}")
+        return payload
 
-    def _ps2_tables_cached(self) -> List[pd.DataFrame]:
-        if self._ps2_tables is None:
-            self._ps2_tables = self._fetch_tables(f"ps2?xjazyk={self.lang}")
-        return self._ps2_tables
+    def _get_national_data(self) -> Dict[str, Any]:
+        if self._national_data is None:
+            self._national_data = self._fetch_json(PRIMARY_RESOURCE)
+        return self._national_data
 
     # ------------------------------------------------------------------
     # Public API
@@ -191,53 +244,41 @@ class ElectionScraper:
 
     def fetch_summary(self) -> Dict[str, Any]:
         """Return national level turnout and counting progress metrics."""
+        data = self._get_national_data()
+        row = data.get("prehled", [])
+        if not isinstance(row, list) or len(row) < 9:
+            raise RuntimeError("Unexpected JSON structure: summary data missing")
 
-        tables = self._ps2_tables_cached()
-        if not tables:
-            raise RuntimeError("Unexpected HTML structure: summary table missing")
-        summary_table = tables[0]
-        if not isinstance(summary_table.columns, pd.MultiIndex):
-            raise ElectionDataUnavailable(
-                self.year,
-                "ps2 summary table",
-            )
-        summary_row = summary_table.iloc[0]
-        summary = {
-            "wards_total": normalize_number(summary_row[("Wards", "total")]),
-            "wards_processed": normalize_number(summary_row[("Wards", "proc.")]),
-            "wards_processed_percent": normalize_percentage(
-                summary_row[("Wards", "in %")]
-            ),
-            "voters_in_roll": normalize_number(
-                summary_row[
-                    ("Voters in the electoral roll", "Voters in the electoral roll")
-                ]
-            ),
-            "envelopes_issued": normalize_number(
-                summary_row[("Issued envelopes", "Issued envelopes")]
-            ),
-            "turnout_percent": normalize_percentage(
-                summary_row[("Turnout in %", "Turnout in %")]
-            ),
-            "envelopes_returned": normalize_number(
-                summary_row[("Returned envelopes", "Returned envelopes")]
-            ),
-            "valid_votes": normalize_number(
-                summary_row[("Valid votes", "Valid votes")]
-            ),
-            "valid_votes_percent": normalize_percentage(
-                summary_row[("% of valid votes", "% of valid votes")]
-            ),
+        def _get_number(values: List[Any], index: int) -> Optional[int]:
+            if index >= len(values):
+                return None
+            return normalize_number(values[index])
+
+        def _get_float(values: List[Any], index: int) -> Optional[float]:
+            if index >= len(values):
+                return None
+            return normalize_percentage(values[index])
+
+        summary: Dict[str, Any] = {
+            "wards_total": _get_number(row, 0),
+            "wards_processed": _get_number(row, 1),
+            "wards_processed_percent": _get_float(row, 2),
+            "voters_in_roll": _get_number(row, 3),
+            "envelopes_issued": _get_number(row, 4),
+            "turnout_percent": _get_float(row, 5),
+            "envelopes_returned": _get_number(row, 8),
+            "valid_votes": _get_number(row, 9),
+            "valid_votes_percent": _get_float(row, 10),
         }
-        if (
-            summary["envelopes_returned"] is not None
-            and summary["valid_votes"] is not None
-        ):
-            invalid = summary["envelopes_returned"] - summary["valid_votes"]
+
+        envelopes_returned = summary["envelopes_returned"]
+        valid_votes = summary["valid_votes"]
+        if envelopes_returned is not None and valid_votes is not None:
+            invalid = envelopes_returned - valid_votes
             summary["invalid_votes"] = invalid
             summary["invalid_votes_percent"] = (
-                round(100.0 * invalid / summary["envelopes_returned"], 2)
-                if summary["envelopes_returned"]
+                round(100.0 * invalid / envelopes_returned, 2)
+                if envelopes_returned
                 else None
             )
         else:
@@ -246,87 +287,102 @@ class ElectionScraper:
         return summary
 
     def fetch_party_results(self) -> List[PartyResult]:
-        tables = self._ps2_tables_cached()
-        if len(tables) < 2:
-            raise RuntimeError("Unexpected HTML structure: party tables missing")
-        party_frames: List[pd.DataFrame] = []
-        for table in tables[1:]:
-            table.columns = [
-                "party_number",
-                "party_name",
-                "votes_total",
-                "votes_percent",
-            ]
-            party_frames.append(table)
-        combined = pd.concat(party_frames, ignore_index=True)
-        combined["party_number"] = combined["party_number"].apply(normalize_number)
-        combined["votes_total"] = combined["votes_total"].apply(normalize_number)
-        combined["votes_percent"] = combined["votes_percent"].apply(
-            normalize_percentage
-        )
-        records: List[PartyResult] = []
-        for row in combined.to_dict(orient="records"):
-            records.append(
+        data = self._get_national_data()
+        entries = data.get("vysledky", [])
+        if not isinstance(entries, list):
+            return []
+
+        results: List[PartyResult] = []
+        self._party_lookup.clear()
+        for entry in entries:
+            if not isinstance(entry, list) or len(entry) < 4:
+                continue
+            party_number = normalize_number(entry[0])
+            if party_number is None:
+                continue
+            party_name = str(entry[1])
+            votes = normalize_number(entry[2]) or 0
+            vote_share = normalize_percentage(entry[3]) or 0.0
+            self._party_lookup[party_number] = party_name
+            results.append(
                 PartyResult(
-                    number=row["party_number"],
-                    name=row["party_name"],
-                    votes=row["votes_total"],
-                    vote_share=row["votes_percent"],
+                    number=party_number,
+                    name=party_name,
+                    votes=votes,
+                    vote_share=vote_share,
                 )
             )
-        records.sort(
-            key=lambda item: (item.votes if item.votes is not None else 0), reverse=True
-        )
-        return records
+        results.sort(key=lambda item: item.votes, reverse=True)
+        return results
 
     def fetch_seat_allocation(self) -> List[SeatAllocation]:
-        script = self._fetch_text(f"d3_rects?xjazyk={self.lang}")
-        try:
-            literal = _extract_js_literal(script, "let data", "[")
-        except ValueError:
+        data = self._get_national_data()
+        entries = data.get("vysledky", [])
+        if not isinstance(entries, list):
             return []
-        payload = _js_object_to_json(literal)
-        try:
-            data = json.loads(payload)
-        except json.JSONDecodeError:
-            return []
+
         seat_results: List[SeatAllocation] = []
-        for item in data:
+        for entry in entries:
+            if not isinstance(entry, list) or len(entry) < 5:
+                continue
+            mandates = normalize_number(entry[4]) or 0
+            if mandates <= 0:
+                continue
+            party_number = normalize_number(entry[0])
+            party_name = self._party_lookup.get(
+                party_number if party_number is not None else -1,
+                str(entry[1]),
+            )
             seat_results.append(
                 SeatAllocation(
-                    party=item.get("party", ""),
-                    mandates=int(normalize_number(item.get("mandate")) or 0),
-                    color=item.get("color"),
+                    party=party_name,
+                    mandates=mandates,
+                    color=None,
                 )
             )
-        seat_results.sort(key=lambda s: s.mandates, reverse=True)
+        seat_results.sort(key=lambda seat: seat.mandates, reverse=True)
         return seat_results
 
     def fetch_region_leaders(self) -> List[RegionLeader]:
-        script = self._fetch_text(f"d3_mapa?xjazyk={self.lang}")
-        try:
-            literal = _extract_js_literal(script, "let data", "{")
-        except ValueError:
+        if not self._party_lookup:
+            self.fetch_party_results()
+
+        payload = self._fetch_json("mapa_vitez.json")
+        kraje = payload.get("kraje", {})
+        if not isinstance(kraje, dict):
             return []
-        payload = _js_object_to_json(literal)
-        try:
-            data = json.loads(payload)
-        except json.JSONDecodeError:
-            return []
+
         leaders: List[RegionLeader] = []
-        for region_id, raw in data.items():
-            processed_percent = normalize_percentage(raw.get("processed"))
-            votes = normalize_number(raw.get("votes"))
+        for region_id_str, raw in kraje.items():
+            if not isinstance(raw, dict):
+                continue
+            try:
+                region_id = int(region_id_str)
+            except (TypeError, ValueError):
+                continue
+            party_number = normalize_number(raw.get("kstrana"))
+            party_name = self._party_lookup.get(
+                party_number if party_number is not None else -1,
+                raw.get("kstranaZkratka", ""),
+            )
+            color_code = raw.get("kstranaBarva")
+            color = (
+                f"#{color_code}" if isinstance(color_code, str) and color_code else None
+            )
             leaders.append(
                 RegionLeader(
-                    region_id=int(region_id),
-                    region_name=raw.get("region", ""),
-                    leading_party=raw.get("party", ""),
-                    leading_percent=normalize_percentage(raw.get("percent")),
-                    votes=votes,
-                    processed_percent=processed_percent,
-                    color=raw.get("color"),
-                    detail_url=self._build_url(raw.get("link", "")),
+                    region_id=region_id,
+                    region_name=str(raw.get("krajNazev", "")),
+                    leading_party=party_name or "",
+                    leading_percent=normalize_percentage(raw.get("procHlasu")),
+                    votes=normalize_number(raw.get("hlasu")),
+                    processed_percent=normalize_percentage(raw.get("procZprac")),
+                    color=color,
+                    detail_url=(
+                        self._build_app_url(f"cs/results/{region_id}")
+                        if region_id
+                        else self._build_app_url("cs/results")
+                    ),
                 )
             )
         leaders.sort(key=lambda item: item.region_id)
@@ -338,14 +394,17 @@ class ElectionScraper:
         seats = self.fetch_seat_allocation()
         regions = self.fetch_region_leaders()
         now = time.time()
+        metadata: Dict[str, Any] = {
+            "year": self.year,
+            "lang": self.lang,
+            "fetched_at": now,
+            "source": self._build_data_url(PRIMARY_RESOURCE),
+            "resource_headers": copy.deepcopy(self.resource_headers),
+        }
+        if self.data_source:
+            metadata["data_source"] = self.data_source
         return {
-            "metadata": {
-                "year": self.year,
-                "lang": self.lang,
-                "fetched_at": now,
-                "source": self._build_url(f"ps2?xjazyk={self.lang}"),
-                "resource_headers": copy.deepcopy(self.resource_headers),
-            },
+            "metadata": metadata,
             "summary": summary,
             "parties": parties,
             "seats": seats,
@@ -573,7 +632,7 @@ def _get_dataset_with_cache(year: int, lang: str) -> Dict[str, Any]:
 def _revalidate_primary_resource(
     year: int, lang: str, etag: str
 ) -> tuple[bool, Optional[requests.Response], Optional[str]]:
-    url = BASE_URL_TEMPLATE.format(year=year) + _primary_resource(lang)
+    url = DATA_BASE_URL_TEMPLATE.format(year=year) + _primary_resource(lang)
     try:
         response = requests.get(
             url, headers={"If-None-Match": etag}, timeout=DEFAULT_TIMEOUT
@@ -598,7 +657,6 @@ def _fetch_dataset(
 ) -> Dict[str, Any]:
     scraper = ElectionScraper(year=year, lang=lang)
     if prefetched_response is not None:
-        scraper._ps2_tables = pd.read_html(StringIO(prefetched_response.text))
         scraper.resource_headers[_primary_resource(lang)] = dict(
             prefetched_response.headers
         )

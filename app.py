@@ -381,6 +381,8 @@ STRINGS: Dict[str, Dict[str, str]] = {
         "share_tools_button": "Update link",
         "cache_hit_label": "cached copy",
         "cache_revalidated_label": "revalidated",
+        "official_roster_header": "Official 2025 ballot order",
+        "official_roster_caption": "Draw numbers set by the State Electoral Commission help keep presets and alias matching aligned with the ballot.",
     },
     "cs": {
         "title": "Dashboard výsledků voleb do Poslanecké sněmovny",
@@ -465,8 +467,47 @@ STRINGS: Dict[str, Dict[str, str]] = {
         "share_tools_button": "Aktualizovat odkaz",
         "cache_hit_label": "uložená kopie",
         "cache_revalidated_label": "znovu ověřeno",
+        "official_roster_header": "Oficiální pořadí losovaných čísel 2025",
+        "official_roster_caption": "Pořadová čísla Státní volební komise sjednocují předvolené koalice a párování aliasů na reálný volební lístek.",
     },
 }
+
+
+def normalize_key(label: str) -> str:
+    """Normalize party labels for lookups and comparisons."""
+
+    ascii_form = (
+        unicodedata.normalize("NFKD", label).encode("ascii", "ignore").decode("ascii")
+    )
+    return re.sub(r"[^a-z0-9]", "", ascii_form.lower())
+
+
+CANONICAL_PARTY_LOOKUP_2025: Dict[str, str] = {}
+PARTY_ALIASES_LOOKUP_2025: Dict[str, Tuple[str, ...]] = {}
+OFFICIAL_PARTY_ORDER_2025: Dict[str, int] = {}
+for draw_number, official_name, aliases in PARTY_CATALOG_2025:
+    alias_family = (official_name, *aliases)
+    PARTY_ALIASES_LOOKUP_2025[official_name] = alias_family
+    OFFICIAL_PARTY_ORDER_2025[official_name] = draw_number
+    for alias in alias_family:
+        CANONICAL_PARTY_LOOKUP_2025[normalize_key(alias)] = official_name
+
+
+def alias_bundle(*canonical_names: str) -> Tuple[str, ...]:
+    """Return a combined alias tuple for the requested canonical parties."""
+
+    seen: Dict[str, str] = {}
+    bundle: List[str] = []
+    for name in canonical_names:
+        aliases = PARTY_ALIASES_LOOKUP_2025.get(name)
+        if not aliases:
+            aliases = (name,)
+        for alias in aliases:
+            key = normalize_key(alias)
+            if key not in seen:
+                seen[key] = alias
+                bundle.append(alias)
+    return tuple(bundle)
 
 
 def get_translator(language: str):
@@ -482,87 +523,36 @@ def get_translator(language: str):
 
 
 COALITION_PRESETS: Sequence[Tuple[str, Sequence[str]]] = (
+    ("SPOLU", alias_bundle("Spolu (ODS, KDU-ČSL, TOP 09)")),
     (
-        "SPOLU",
-        (
-            "SPOLU",
-            "SPOLU - ODS, KDU-CSL, TOP 09",
-        ),
-    ),
-    (
-        "SPOLU + STAN + Pirates",
-        (
-            "SPOLU",
-            "SPOLU - ODS, KDU-CSL, TOP 09",
-            "STAROSTOVE",
-            "STAROSTOVE A NEZAVISLI",
-            "STAN",
-            "PIRATI",
-            "CESKA PIRATSKA STRANA",
-            "Ceska piratska strana",
+        "SPOLU + STAN + Piráti",
+        alias_bundle(
+            "Spolu (ODS, KDU-ČSL, TOP 09)",
+            "Starostové a nezávislí",
+            "Česká pirátská strana",
         ),
     ),
     (
         "ANO + SPD",
-        (
-            "ANO",
-            "ANO 2011",
-            "SPD",
-            "Svoboda a pr. demokracie (SPD)",
-        ),
+        alias_bundle("ANO 2011", "Svoboda a přímá demokracie (SPD)"),
     ),
     (
-        "ANO + SPD + Motorists",
-        (
-            "ANO",
+        "ANO + SPD + AUTO",
+        alias_bundle(
             "ANO 2011",
-            "SPD",
-            "Svoboda a pr. demokracie (SPD)",
-            "Motoriste",
-            "Motoriste sobe",
-            "Motoristé",
+            "Svoboda a přímá demokracie (SPD)",
             "Motoristé sobě",
-            "AUTO",
         ),
     ),
+    ("ANO + AUTO", alias_bundle("ANO 2011", "Motoristé sobě")),
+    ("ANO + Stačilo!", alias_bundle("ANO 2011", "Stačilo!")),
     (
-        "ANO + Motorists",
-        (
-            "ANO",
-            "ANO 2011",
-            "Motoriste",
-            "Motoriste sobe",
-            "Motoristé",
-            "Motoristé sobě",
-            "AUTO",
-        ),
+        "Piráti + STAN",
+        alias_bundle("Česká pirátská strana", "Starostové a nezávislí"),
     ),
     (
-        "ANO + Stačilo!",
-        (
-            "ANO",
-            "ANO 2011",
-            "STACILO!",
-            "Stačilo!",
-        ),
-    ),
-    (
-        "Pirates + Mayors",
-        (
-            "PIRATI",
-            "PIRATI a STAROSTOVE",
-            "STAROSTOVE",
-            "STAROSTOVE A NEZAVISLI",
-        ),
-    ),
-    (
-        "Democratic Bloc",
-        (
-            "SPOLU",
-            "SPOLU - ODS, KDU-CSL, TOP 09",
-            "PIRATI",
-            "PIRATI a STAROSTOVE",
-        ),
+        "Demokratický blok",
+        alias_bundle("Spolu (ODS, KDU-ČSL, TOP 09)", "Česká pirátská strana"),
     ),
 )
 
@@ -602,47 +592,10 @@ def fmt_signed_percent(value: Optional[float], decimals: int = 2) -> str:
     return f"{value:+.{decimals}f}%"
 
 
-def normalize_key(label: str) -> str:
-    """Normalize party labels for lookups and comparisons."""
-
-    ascii_form = (
-        unicodedata.normalize("NFKD", label).encode("ascii", "ignore").decode("ascii")
-    )
-    return re.sub(r"[^a-z0-9]", "", ascii_form.lower())
-
-
-CANONICAL_PARTY_LOOKUP_2025: Dict[str, str] = {}
-PARTY_ALIASES_LOOKUP_2025: Dict[str, Tuple[str, ...]] = {}
-OFFICIAL_PARTY_ORDER_2025: Dict[str, int] = {}
-for draw_number, official_name, aliases in PARTY_CATALOG_2025:
-    alias_family = (official_name, *aliases)
-    PARTY_ALIASES_LOOKUP_2025[official_name] = alias_family
-    OFFICIAL_PARTY_ORDER_2025[official_name] = draw_number
-    for alias in alias_family:
-        CANONICAL_PARTY_LOOKUP_2025[normalize_key(alias)] = official_name
-
-
 def canonical_party_name(label: str) -> str:
     """Return the official 2025 label when available."""
 
     return CANONICAL_PARTY_LOOKUP_2025.get(normalize_key(label), label)
-
-
-def alias_bundle(*canonical_names: str) -> Tuple[str, ...]:
-    """Return a combined alias tuple for the requested canonical parties."""
-
-    seen: Dict[str, str] = {}
-    bundle: List[str] = []
-    for name in canonical_names:
-        aliases = PARTY_ALIASES_LOOKUP_2025.get(name)
-        if not aliases:
-            aliases = (name,)
-        for alias in aliases:
-            key = normalize_key(alias)
-            if key not in seen:
-                seen[key] = alias
-                bundle.append(alias)
-    return tuple(bundle)
 
 
 def infer_coalition_size(name: str) -> int:
@@ -1048,7 +1001,9 @@ def assign_coalition_groups(parties: Sequence[str]) -> Dict[str, str]:
     return groups
 
 
-def render_coalition_builder(parties_df: pd.DataFrame, t) -> None:
+def render_coalition_builder(
+    parties_df: pd.DataFrame, t, effective_year: Optional[int] = None
+) -> None:
     st.markdown(f"### {t('coalition_builder')}")
     if parties_df.empty:
         st.info(t("threshold_waiting"))
@@ -1056,6 +1011,12 @@ def render_coalition_builder(parties_df: pd.DataFrame, t) -> None:
 
     seat_map = parties_df.set_index("party")["mandates"].to_dict()
     party_names = parties_df["party"].tolist()
+    if effective_year and effective_year >= 2025:
+        official_roster = [official for _, official, _ in PARTY_CATALOG_2025]
+        # Preserve dataset ordering, append missing official subjects.
+        for official in official_roster:
+            if official not in party_names:
+                party_names.append(official)
     if "official_draw" in parties_df.columns:
         draw_order = parties_df.set_index("party")["official_draw"].to_dict()
 
@@ -1066,6 +1027,14 @@ def render_coalition_builder(parties_df: pd.DataFrame, t) -> None:
             return (float(draw), name)
 
         party_names = sorted(party_names, key=sort_key)
+    elif effective_year and effective_year >= 2025:
+        supplemental_draw = {official: draw for draw, official, _ in PARTY_CATALOG_2025}
+
+        def fallback_sort_key(name: str) -> Tuple[float, str]:
+            draw = supplemental_draw.get(name, float("inf"))
+            return (float(draw), name)
+
+        party_names = sorted(party_names, key=fallback_sort_key)
 
     if "coalition_selection" not in st.session_state:
         st.session_state["coalition_selection"] = []
@@ -1477,6 +1446,20 @@ def render_share_tools(language_code: str, t) -> None:
         st.experimental_set_query_params(**share_params)
 
 
+def render_official_roster(effective_year: Optional[int], t) -> None:
+    if not effective_year or effective_year < 2025:
+        return
+
+    roster_records = [
+        {"Draw": draw, "Party": official_name}
+        for draw, official_name, _ in PARTY_CATALOG_2025
+    ]
+    roster_df = pd.DataFrame(roster_records)
+    st.markdown(f"### {t('official_roster_header')}")
+    st.dataframe(roster_df, hide_index=True, use_container_width=True)
+    st.caption(t("official_roster_caption"))
+
+
 def render_downloads(
     parties_df: pd.DataFrame, regions_df: pd.DataFrame, effective_year: int, t
 ) -> None:
@@ -1521,10 +1504,14 @@ def main() -> None:
 
     try:
         dataset = load_election_dataset(primary_year, fallback_year)
-    except ElectionDataUnavailable:
-        st.error(
-            "Official election results are not yet published. Enable the fallback option to preview the latest available dataset."
-        )
+    except ElectionDataUnavailable as exc:
+        reason = getattr(exc, "reason", None)
+        detail = "Official election results are not yet published or the source feed is temporarily unreachable."
+        if reason:
+            detail += f"\n\nReported by volby.cz: {reason}"
+        if not allow_fallback:
+            detail += "\n\nEnable the fallback option in the sidebar to preview the latest archived dataset."
+        st.error(detail)
         return
 
     metadata = dataset.get("metadata", {})
@@ -1600,7 +1587,7 @@ def main() -> None:
         st.caption(build_provenance_badge(metadata, "provenance_scope_majority", t))
         render_hemicycle(seats_df, parties_df, regions_df, t)
         st.divider()
-        render_coalition_builder(parties_df, t)
+        render_coalition_builder(parties_df, t, effective_year=effective_year)
         st.divider()
         render_threshold_watchlist(parties_df, t)
         st.divider()
@@ -1627,6 +1614,8 @@ def main() -> None:
 
     with clarity_tab:
         render_uncertainty_panel(summary, seats_df, t)
+        st.divider()
+        render_official_roster(effective_year, t)
         st.divider()
         render_methodology_section(t)
         st.divider()

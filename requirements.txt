@@ -1,5 +1,5 @@
 pandas==2.3.3
-streamlit==1.52.2
+streamlit==1.53.0
 altair>=5.3,<7
 requests>=2.32,<3
 beautifulsoup4>=4.12,<5

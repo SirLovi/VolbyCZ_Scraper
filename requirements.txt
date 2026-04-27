@@ -2,6 +2,6 @@ pandas==3.0.2
 streamlit==1.56.0
 altair>=6.1.0,<7
 requests>=2.32,<3
-beautifulsoup4>=4.12,<5
+beautifulsoup4>=4.14.3,<5
 lxml>=6.1.0,<7
 html5lib>=1.1,<2

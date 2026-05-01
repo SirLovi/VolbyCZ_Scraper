@@ -1403,8 +1403,7 @@ def render_preference_leaderboard_placeholder(t) -> None:
 
 def render_methodology_section(t) -> None:
     with st.expander("Methodology · Metodika"):
-        st.markdown(
-            """
+        st.markdown("""
 **EN**
 - Seats are allocated via the D'Hondt method across 14 regions (26 mandátových obvodů) with a chamber size of 200.
 - Legal thresholds: 5 % for single parties, 8 % for two-party coalitions, 11 % for 3+ party coalitions (law 350/2021 Sb.).
@@ -1416,8 +1415,7 @@ def render_methodology_section(t) -> None:
 - Zákonné klauzule: 5 % pro samostatné subjekty, 8 % pro koalice dvou, 11 % pro koalice tří a více stran (zákon 350/2021 Sb.).
 - Preferenční hlasy (kroužky) mohou přeskupit kandidátky při ≥5 % hlasů pro kandidáta.
 - Oficiální metodika: [ČSÚ (CZ)](https://www.volby.cz/opendata/).
-            """
-        )
+            """)
 
 
 def render_uncertainty_panel(
